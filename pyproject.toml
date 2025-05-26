@@ -21,6 +21,7 @@ pytz = "*"
 pyyaml = "*"
 python-dateutil = "^2.9.0.post0"
 python-dotenv = "^1.0.1"
+boto3 = "^1.38.23"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -34,7 +35,7 @@ pytest-asyncio = "^0.23.6"
 pytest = "^8.2.0"
 pytest-watch = "^4.2.0"
 vcrpy = "^6.0.1"
-langgraph-cli = "^0.1.35"
+langgraph-cli = {extras = ["inmem"], version = "^0.2.10"}
 
 [build-system]
 requires = ["poetry-core"]

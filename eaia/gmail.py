@@ -37,11 +37,26 @@ def get_credentials(
 ) -> Credentials:
     creds = None
     _SECRETS_DIR.mkdir(parents=True, exist_ok=True)
-    gmail_token = gmail_token or os.getenv("GMAIL_TOKEN")
+    
+    # Check if we should use AWS Secrets Manager
+    use_aws = os.getenv("USE_AWS_SECRETS", "false").lower() == "true"
+    
+    if use_aws:
+        try:
+            from eaia.aws_secrets import get_gmail_credentials_from_aws
+            gmail_secret, gmail_token = get_gmail_credentials_from_aws()
+        except Exception as e:
+            logger.warning(f"Failed to get credentials from AWS: {e}")
+            # Fall back to environment variables
+            gmail_token = gmail_token or os.getenv("GMAIL_TOKEN")
+            gmail_secret = gmail_secret or os.getenv("GMAIL_SECRET")
+    else:
+        gmail_token = gmail_token or os.getenv("GMAIL_TOKEN")
+        gmail_secret = gmail_secret or os.getenv("GMAIL_SECRET")
+    
     if gmail_token:
         with open(_TOKEN_PATH, "w") as token:
             token.write(gmail_token)
-    gmail_secret = gmail_secret or os.getenv("GMAIL_SECRET")
     if gmail_secret:
         with open(_SECRETS_PATH, "w") as secret:
             secret.write(gmail_secret)
