@@ -15,10 +15,5 @@
       "dims": 1536
     }
   },
-  "env": ".env",
-  "api": {
-    "entry_point": "api_config:app",
-    "path_prefix": "/",
-    "cors_origins": ["*"]
-  }
+  "env": ".env"
 }
