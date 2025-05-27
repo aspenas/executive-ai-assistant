@@ -4,6 +4,9 @@
 # Primary email account to monitor
 email: patrick@highline.work
 
+# Default AI model to use
+model: gpt-4o
+
 # Personal information
 full_name: Patrick Smith
 name: Patrick

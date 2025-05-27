@@ -31,7 +31,7 @@ Subject: {subject}
 
 
 async def rewrite(state: State, config, store):
-    model = config["configurable"].get("model", "gpt-4o")
+    model = config.get("configurable", {}).get("model") or "gpt-4o"
     llm = ChatOpenAI(model=model, temperature=0)
     prev_message = state["messages"][-1]
     draft = prev_message.tool_calls[0]["args"]["content"]
