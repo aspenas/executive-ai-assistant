@@ -1,0 +1,9 @@
+{
+  "deployment": {
+    "name": "executive-ai-assistant",
+    "version": "1.0.0",
+    "public": true,
+    "api_path": "/",
+    "ui_path": "/studio"
+  }
+}
