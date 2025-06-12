@@ -126,3 +126,35 @@ settings:
   vip_contacts:
     # Add important email addresses here
     # - "important@example.com"
+  
+  error_handling:
+    # Maximum retry attempts for failed operations
+    max_retries: 3
+    retry_delay: 2.0
+    circuit_breaker_enabled: true
+    circuit_breaker_threshold: 5
+  
+  audit_logging:
+    enabled: true
+    log_file: "logs/eaia_audit.log"
+    retention_days: 90
+  
+  performance:
+    gmail_rate_limit: 250
+    llm_rate_limit: 60
+    enable_caching: true
+    cache_ttl: 300
+  
+  security:
+    sanitize_content: true
+    # Maximum email size to process (MB)
+    max_email_size: 25
+    scan_attachments: true
+    allowed_attachment_types:
+      - "pdf"
+      - "doc"
+      - "docx"
+      - "txt"
+      - "png"
+      - "jpg"
+      - "jpeg"

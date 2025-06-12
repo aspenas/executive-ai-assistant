@@ -1,5 +1,7 @@
 """Core agent responsible for drafting email."""
 
+import logging
+from typing import Dict, Any
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.store.base import BaseStore
@@ -15,6 +17,10 @@ from eaia.schemas import (
     email_template,
 )
 from eaia.main.config import get_config
+from eaia.main.audit_logger import audit_logger
+from eaia.main.error_handler import llm_retry, error_handler
+
+logger = logging.getLogger(__name__)
 
 EMAIL_WRITING_INSTRUCTIONS = """You are {full_name}'s executive assistant. You are a top-notch executive assistant who cares about {name} performing as well as possible.
 
@@ -79,76 +85,131 @@ Here is the email thread. Note that this is the full email thread. Pay special a
 {email}"""
 
 
+@llm_retry
 async def draft_response(state: State, config: RunnableConfig, store: BaseStore):
-    """Write an email to a customer."""
-    model = config["configurable"].get("model", "gpt-4o")
-    llm = ChatOpenAI(
-        model=model,
-        temperature=0,
-        parallel_tool_calls=False,
-        tool_choice="required",
-    )
-    tools = [
-        NewEmailDraft,
-        ResponseEmailDraft,
-        Question,
-        MeetingAssistant,
-        SendCalendarInvite,
-    ]
-    messages = state.get("messages") or []
-    if len(messages) > 0:
-        tools.append(Ignore)
-    prompt_config = get_config(config)
-    namespace = (config["configurable"].get("assistant_id", "default"),)
-    key = "schedule_preferences"
-    result = await store.aget(namespace, key)
-    if result and "data" in result.value:
-        schedule_preferences = result.value["data"]
-    else:
-        await store.aput(namespace, key, {"data": prompt_config["schedule_preferences"]})
-        schedule_preferences = prompt_config["schedule_preferences"]
-    key = "random_preferences"
-    result = await store.aget(namespace, key)
-    if result and "data" in result.value:
-        random_preferences = result.value["data"]
-    else:
-        await store.aput(
-            namespace, key, {"data": prompt_config["background_preferences"]}
+    """Enhanced email drafting with error handling and audit logging."""
+    email_id = state["email"].get("id", "unknown")
+    
+    try:
+        logger.info(f"Starting draft response for email {email_id}")
+        
+        model = config["configurable"].get("model", "gpt-4o")
+        llm = ChatOpenAI(
+            model=model,
+            temperature=0,
+            parallel_tool_calls=False,
+            tool_choice="required",
         )
-        random_preferences = prompt_config["background_preferences"]
-    key = "response_preferences"
-    result = await store.aget(namespace, key)
-    if result and "data" in result.value:
-        response_preferences = result.value["data"]
-    else:
-        await store.aput(namespace, key, {"data": prompt_config["response_preferences"]})
-        response_preferences = prompt_config["response_preferences"]
-    _prompt = EMAIL_WRITING_INSTRUCTIONS.format(
-        schedule_preferences=schedule_preferences,
-        random_preferences=random_preferences,
-        response_preferences=response_preferences,
-        name=prompt_config["name"],
-        full_name=prompt_config["full_name"],
-        background=prompt_config["background"],
-    )
-    input_message = draft_prompt.format(
-        instructions=_prompt,
-        email=email_template.format(
-            email_thread=state["email"]["page_content"],
-            author=state["email"]["from_email"],
-            subject=state["email"]["subject"],
-            to=state["email"].get("to_email", ""),
-        ),
-    )
+        tools = [
+            NewEmailDraft,
+            ResponseEmailDraft,
+            Question,
+            MeetingAssistant,
+            SendCalendarInvite,
+        ]
+        messages = state.get("messages") or []
+        if len(messages) > 0:
+            tools.append(Ignore)
+        
+        prompt_config = get_config(config)
+        namespace = (config["configurable"].get("assistant_id", "default"),)
+        
+        preferences = await _load_preferences_safely(store, namespace, prompt_config)
+        
+        priority_info = await store.aget(namespace, f"email_priority_{email_id}")
+        priority_context = ""
+        if priority_info and "value" in priority_info.__dict__:
+            priority_data = priority_info.value
+            priority_context = f"\n\nPRIORITY CONTEXT: This email was scored {priority_data.get('priority_score', 0)}/100 ({priority_data.get('priority_category', 'unknown')} priority). Consider this when crafting your response."
+        
+        _prompt = EMAIL_WRITING_INSTRUCTIONS.format(
+            schedule_preferences=preferences["schedule_preferences"],
+            random_preferences=preferences["random_preferences"],
+            response_preferences=preferences["response_preferences"],
+            name=prompt_config["name"],
+            full_name=prompt_config["full_name"],
+            background=prompt_config["background"],
+        ) + priority_context
+        
+        input_message = draft_prompt.format(
+            instructions=_prompt,
+            email=email_template.format(
+                email_thread=state["email"]["page_content"],
+                author=state["email"]["from_email"],
+                subject=state["email"]["subject"],
+                to=state["email"].get("to_email", ""),
+            ),
+        )
 
-    model = llm.bind_tools(tools)
-    messages = [{"role": "user", "content": input_message}] + messages
-    i = 0
-    while i < 5:
-        response = await model.ainvoke(messages)
-        if len(response.tool_calls) != 1:
-            i += 1
-            messages += [{"role": "user", "content": "Please call a valid tool call."}]
-        else:
-            break
-    return {"draft": response, "messages": [response]}
+        model = llm.bind_tools(tools)
+        messages = [{"role": "user", "content": input_message}] + messages
+        
+        response = await _invoke_with_retry(model, messages, email_id)
+        
+        if response and hasattr(response, 'tool_calls') and response.tool_calls:
+            tool_call = response.tool_calls[0]
+            draft_type = tool_call.get("name", "unknown")
+            audit_logger.log_email_drafted(email_id, draft_type, 1)
+            logger.info(f"Successfully drafted {draft_type} for email {email_id}")
+        
+        return {"draft": response, "messages": [response]}
+        
+    except Exception as e:
+        logger.error(f"Error in draft_response for email {email_id}: {str(e)}", exc_info=True)
+        audit_logger.log_error(email_id, "draft_error", str(e))
+        
+        fallback_response = await error_handler.handle_llm_error(e, {"function": "draft", "email_id": email_id})
+        return {"draft": fallback_response, "messages": []}
+
+
+async def _load_preferences_safely(store: BaseStore, namespace: tuple, prompt_config: Dict[str, Any]) -> Dict[str, str]:
+    """Safely load user preferences with fallbacks."""
+    preferences = {}
+    
+    preference_keys = {
+        "schedule_preferences": "schedule_preferences",
+        "random_preferences": "background_preferences", 
+        "response_preferences": "response_preferences"
+    }
+    
+    for key, config_key in preference_keys.items():
+        try:
+            result = await store.aget(namespace, key)
+            if result and "data" in result.value:
+                preferences[key] = result.value["data"]
+            else:
+                default_value = prompt_config.get(config_key, "")
+                await store.aput(namespace, key, {"data": default_value})
+                preferences[key] = default_value
+        except Exception as e:
+            logger.warning(f"Error loading preference {key}: {str(e)}")
+            preferences[key] = prompt_config.get(config_key, "")
+    
+    return preferences
+
+
+async def _invoke_with_retry(model, messages: list, email_id: str, max_attempts: int = 5):
+    """Invoke model with enhanced retry logic."""
+    for attempt in range(max_attempts):
+        try:
+            response = await model.ainvoke(messages)
+            
+            if not hasattr(response, 'tool_calls') or len(response.tool_calls) != 1:
+                if attempt < max_attempts - 1:
+                    logger.warning(f"Invalid tool call response for email {email_id}, attempt {attempt + 1}")
+                    messages.append({"role": "user", "content": "Please call exactly one valid tool."})
+                    continue
+                else:
+                    logger.error(f"Failed to get valid tool call after {max_attempts} attempts for email {email_id}")
+                    audit_logger.log_error(email_id, "invalid_tool_call", f"No valid tool call after {max_attempts} attempts")
+            
+            return response
+            
+        except Exception as e:
+            if attempt < max_attempts - 1:
+                logger.warning(f"Model invocation failed for email {email_id}, attempt {attempt + 1}: {str(e)}")
+                continue
+            else:
+                raise e
+    
+    return None
